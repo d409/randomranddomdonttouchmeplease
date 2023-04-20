@@ -44,7 +44,7 @@ def create_database():
 def add_city(city_name):
     conn = sqlite3.connect("announce_bot.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO cities (name) VALUES (?)", (city_name,))
+    cursor.execute("INSERT OR IGNORE INTO cities (city) VALUES (?)", (city_name,))  # Исправьте здесь
     conn.commit()
     conn.close()
 
