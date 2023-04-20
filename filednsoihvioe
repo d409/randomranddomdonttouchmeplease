@@ -80,44 +80,13 @@ def create_tables():
     conn = sqlite3.connect("announce_bot.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS cities (
-        id INTEGER PRIMARY KEY,
-        city TEXT UNIQUE
-    )
-    """)
+    cursor.execute("CREATE TABLE IF NOT EXISTS cities (id INTEGER PRIMARY KEY, city_name TEXT UNIQUE NOT NULL);")
+    cursor.execute("CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY, service_name TEXT UNIQUE NOT NULL);")
+    cursor.execute("CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY, user_id INTEGER, phone TEXT, email TEXT, telegram_username TEXT, service_id INTEGER, city_id INTEGER, description TEXT, price REAL, publication_date TEXT, FOREIGN KEY (service_id) REFERENCES services (id), FOREIGN KEY (city_id) REFERENCES cities (id));")
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS services (
-        id INTEGER PRIMARY KEY,
-        service TEXT UNIQUE
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        phone TEXT UNIQUE
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS announcements (
-        id INTEGER PRIMARY KEY,
-        user_id INTEGER,
-        city_id INTEGER,
-        service_id INTEGER,
-        description TEXT,
-        price REAL,
-        FOREIGN KEY (user_id) REFERENCES users (id),
-        FOREIGN KEY (city_id) REFERENCES cities (id),
-        FOREIGN KEY (service_id) REFERENCES services (id)
-    )
-    """)
-
-    conn.commit()  # Добавьте эту строку
+    conn.commit()
     conn.close()
+
 
 def populate_database():
     cities = ["Москва", "Санкт-Петербург", "Новосибирск", "Все города"]
