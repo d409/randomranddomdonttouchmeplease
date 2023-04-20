@@ -88,6 +88,7 @@ def create_tables():
     conn.close()
 
 
+
 def populate_database():
     cities = ["Москва", "Санкт-Петербург", "Новосибирск", "Все города"]
     services = ["Уборка", "Ремонт", "Доставка", "Прочие"]
