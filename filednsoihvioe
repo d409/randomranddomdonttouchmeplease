@@ -519,8 +519,9 @@ def main():
     updater.start_polling()
     updater.idle()
 
+create_tables()
+populate_database()
+
 if __name__ == "__main__":
-    create_tables()
-    populate_database()
     updater.start_polling()
     updater.idle()
