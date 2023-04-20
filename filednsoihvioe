@@ -496,6 +496,7 @@ def main():
 
 def main():
     create_tables()
+    populate_database()
     bot.polling(none_stop=True)
 
 if __name__ == '__main__':
