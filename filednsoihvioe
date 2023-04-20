@@ -1,503 +1,285 @@
-import os
-import telegram
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    CallbackContext,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-)
 import sqlite3
 
-def create_database():
-    conn = sqlite3.connect("announce_bot.db")
+def create_users_table():
+    conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS cities (
-                        id INTEGER PRIMARY KEY,
-                        name TEXT UNIQUE NOT NULL)""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS services (
-                        id INTEGER PRIMARY KEY,
-                        name TEXT UNIQUE NOT NULL)""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-                        id INTEGER PRIMARY KEY,
-                        user_id INTEGER UNIQUE NOT NULL,
-                        phone_number TEXT,
-                        username TEXT)""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS announcements (
-                        id INTEGER PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        city_id INTEGER,
-                        service_id INTEGER,
-                        description TEXT,
-                        price REAL,
-                        published_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (city_id) REFERENCES cities (id),
-                        FOREIGN KEY (service_id) REFERENCES services (id),
-                        FOREIGN KEY (user_id) REFERENCES users (id))""")
+                        user_id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        phone TEXT,
+                        registered INTEGER NOT NULL DEFAULT 0
+                    )""")
     conn.commit()
     conn.close()
 
-def add_city(city_name):
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO cities (city) VALUES (?)", (city_name,))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        # Игнорировать дублирующиеся записи
-        pass
-    conn.close()
+create_users_table()  # Вызовите эту функцию, чтобы создать таблицу пользователей при запуске скрипта
 
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.types import ParseMode
+from aiogram.utils import executor
+from aiogram.utils.markdown import text, hlink
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import Command, Text
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-def add_service(service_name):
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO services (name) VALUES (?)", (service_name,))
-    conn.commit()
-    conn.close()
+logging.basicConfig(level=logging.INFO)
 
-def get_cities():
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM cities")
-    cities = cursor.fetchall()
-    conn.close()
-    return cities
+API_TOKEN = '5741958407:AAFlowMVLrQM2brVpCMDx9yRNs27sMy3XsE'
 
-def get_services():
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM services")
-    services = cursor.fetchall()
-    conn.close()
-    return services
+bot = Bot(token=API_TOKEN)
+
+dp = Dispatcher(bot)
+dp.middleware.setup(LoggingMiddleware())
+
+# Database functions
+def connect_to_db():
+    connection = sqlite3.connect("services.db")
+    cursor = connection.cursor()
+    return connection, cursor
 
 def create_tables():
-    conn = sqlite3.connect("announce_bot.db")
+    connection, cursor = connect_to_db()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                     (id INTEGER PRIMARY KEY, name TEXT, service TEXT, city TEXT, bio TEXT, portfolio TEXT)''')
+    connection.commit()
+    connection.close()
+
+def add_user(user_id, name, service, city, bio, portfolio):
+    connection, cursor = connect_to_db()
+    cursor.execute("INSERT INTO users (id, name, service, city, bio, portfolio) VALUES (?, ?, ?, ?, ?, ?)",
+                   (user_id, name, service, city, bio, portfolio))
+    connection.commit()
+    connection.close()
+
+def get_user(user_id):
+    conn = sqlite3.connect("users.db")
     cursor = conn.cursor()
-
-    cursor.execute("CREATE TABLE IF NOT EXISTS cities (id INTEGER PRIMARY KEY, city_name TEXT UNIQUE NOT NULL);")
-    cursor.execute("CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY, service_name TEXT UNIQUE NOT NULL);")
-    cursor.execute("CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY, user_id INTEGER, phone TEXT, email TEXT, telegram_username TEXT, service_id INTEGER, city_id INTEGER, description TEXT, price REAL, publication_date TEXT, FOREIGN KEY (service_id) REFERENCES services (id), FOREIGN KEY (city_id) REFERENCES cities (id));")
-
-    conn.commit()
+    cursor.execute("SELECT * FROM users WHERE user_id=?", (user_id,))  # Измените 'id' на 'user_id'
+    user = cursor.fetchone()
     conn.close()
+    return user
 
+def update_user(user_id, name, service, city, bio, portfolio):
+    connection, cursor = connect_to_db()
+    cursor.execute("UPDATE users SET name=?, service=?, city=?, bio=?, portfolio=? WHERE id=?",
+                   (name, service, city, bio, portfolio, user_id))
+    connection.commit()
+    connection.close()
 
+def get_ads_by_criteria(service, city):
+    connection, cursor = connect_to_db()
+    if city == "Все города":
+        cursor.execute("SELECT * FROM users WHERE service=?", (service,))
+    else:
+        cursor.execute("SELECT * FROM users WHERE service=? AND city=?", (service, city))
+    ads = cursor.fetchall()
+    connection.close()
+    return ads
 
-def populate_database():
-    cities = ["Москва", "Санкт-Петербург", "Новосибирск", "Все города"]
-    services = ["Уборка", "Ремонт", "Доставка", "Прочие"]
+create_tables()
 
-    for city in cities:
-        add_city(city)
+# Keyboards
+def main_menu_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("📝 Создать объявление")
+    keyboard.add("🔍 Найти услугу")
+    keyboard.add("👤 Открыть профиль")
+    return keyboard
 
+def back_to_main_menu_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Вернуться на главную")
+    return keyboard
+
+def open_profile_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Редактировать профиль")
+    keyboard.add("Вернуться на главную")
+    return keyboard
+
+def services_inline_keyboard():
+    keyboard = InlineKeyboardMarkup()
+    services = ["Услуга 1", "Услуга 2", "Услуга 3", "Услуга 4", "Услуга 5"]
     for service in services:
-        add_service(service)
+        button = InlineKeyboardButton(service, callback_data=f'select_service_{service}')
+        keyboard.add(button)
+    return keyboard
 
-populate_database()
+def cities_inline_keyboard():
+    keyboard = InlineKeyboardMarkup()
+    cities = ["Город 1", "Город 2", "Город 3", "Город 4", "Город 5", "Все города"]
+    for city in cities:
+        button = InlineKeyboardButton(city, callback_data=f'select_city_{city}')
+        keyboard.add(button)
+    return keyboard
 
-def start(update: Update, context: CallbackContext):
-    user = update.effective_user
-    keyboard = [
-        [
-            InlineKeyboardButton("Выложить объявление", callback_data="post_announcement"),
-            InlineKeyboardButton("Найти объявление", callback_data="find_announcement"),
-        ],
-        [InlineKeyboardButton("Мой профиль", callback_data="my_profile")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(f"Привет, {user.first_name}!\nЯ - AnnounceBot, и я помогу тебе размещать и находить объявления о предоставляемых услугах.", reply_markup=reply_markup)
+def registration_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Создать объявление")
+    keyboard.add("Вернуться на главную")
+    return keyboard
 
-def handle_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    if query.data == "post_announcement":
-        post_announcement_step1(update, context)
-    elif query.data == "find_announcement":
-        find_announcement_step1(update, context)
-    elif query.data == "my_profile":
-        my_profile(update, context)
+# Handlers
+@dp.message_handler(commands=['start', 'help'])
+async def send_welcome(message: types.Message):
+    await message.reply("Добро пожаловать!\nЯ бот, который поможет вам найти или предложить услуги.", reply_markup=main_menu_keyboard())
 
-POST_CITY, POST_SERVICE, POST_DESCRIPTION, POST_PRICE, POST_PHONE = range(5)
+@dp.message_handler(lambda message: message.text == "Вернуться на главную")
+async def main_menu(message: types.Message):
+    await message.reply("Вы вернулись в главное меню.", reply_markup=main_menu_keyboard())
 
-def post_announcement_step1(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
+@dp.message_handler(lambda message: message.text == "Создать объявление")
+async def create_ad(message: types.Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
 
-    keyboard = [
-        [InlineKeyboardButton(city[1], callback_data=f"post_city_{city[0]}") for city in get_cities()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    query.edit_message_text("Выберите город для вашего объявления:", reply_markup=reply_markup)
-    return POST_CITY
-
-def post_announcement_step2(update: Update, context: CallbackContext):
-    query = update.callback_query
-    city_id = int(query.data.split("_")[2])
-    context.user_data["post_city_id"] = city_id
-    query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton(service[1], callback_data=f"post_service_{service[0]}") for service in get_services()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    query.edit_message_text("Выберите услугу для вашего объявления:", reply_markup=reply_markup)
-    return POST_SERVICE
-
-def post_announcement_step3(update: Update, context: CallbackContext):
-    query = update.callback_query
-    service_id = int(query.data.split("_")[2])
-    context.user_data["post_service_id"] = service_id
-    query.answer()
-
-    query.edit_message_text("Напишите описание вашей услуги (от 20 до 160 символов):")
-    return POST_DESCRIPTION
-
-def post_announcement_step4(update: Update, context: CallbackContext):
-    description = update.message.text.strip()
-    if len(description) < 20 or len(description) > 160:
-        update.message.reply_text("Описание должно быть от 20 до 160 символов. Попробуйте еще раз.")
-        return POST_DESCRIPTION
-
-    context.user_data["post_description"] = description
-    update.message.reply_text("Введите стоимость вашей услуги:")
-    return POST_PRICE
-
-def post_announcement_step5(update: Update, context: CallbackContext):
-    try:
-        price = float(update.message.text.strip().replace(',', '.'))
-    except ValueError:
-        update.message.reply_text("Некорректное значение стоимости. Попробуйте еще раз.")
-        return POST_PRICE
-
-    context.user_data["post_price"] = price
-    update.message.reply_text("Отправьте свой номер телефона или нажмите на кнопку ниже:", reply_markup=telegram.ReplyKeyboardMarkup([[
-        telegram.KeyboardButton("Поделиться номером телефона", request_contact=True)
-    ]], one_time_keyboard=True, resize_keyboard=True))
-    return POST_PHONE
-
-def post_announcement_step6(update: Update, context: CallbackContext):
-    contact = update.message.contact
-    if contact:
-        phone_number = contact.phone_number
+    if user:
+        await message.reply("Вы уже зарегистрированы. Хотите отредактировать свой профиль?", reply_markup=open_profile_keyboard())
     else:
-        phone_number = update.message.text.strip()
+        await message.reply("Пожалуйста, введите свое имя и фамилию.", reply_markup=back_to_main_menu_keyboard())
+        state = dp.current_state(user=message.from_user.id)
+        await state.next()
 
-    user_id = update.effective_user.id
-    city_id = context.user_data["post_city_id"]
-    service_id = context.user_data["post_service_id"]
-    description = context.user_data["post_description"]
-    price = context.user_data["post_price"]
 
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, phone_number) VALUES (?, ?)", (user_id, phone_number))
-    conn.commit()
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=0)
+async def process_name(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['name'] = message.text
 
-    cursor.execute(
-        """
-        INSERT INTO announcements (user_id, city_id, service_id, description, price)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (user_id, city_id, service_id, description, price),
-    )
-    conn.commit()
-    conn.close()
+    await message.reply("Выберите услугу, которую вы предоставляете.", reply_markup=services_inline_keyboard())
 
-    update.message.reply_text("Ваше объявление успешно размещено!")
-    return ConversationHandler.END
+@dp.callback_query_handler(lambda call: call.data.startswith('select_service_'), state=0)
+async def select_service_callback(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    selected_service = call.data[len('select_service_'):]
 
-FIND_CITY, FIND_SERVICE, FIND_PRICE_RANGE = range(3)
+    async with state.proxy() as data:
+        data['service'] = selected_service
 
-def find_announcement_step1(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
+    await call.message.reply("Выберите ваш город.", reply_markup=cities_inline_keyboard())
 
-    keyboard = [
-        [InlineKeyboardButton(city[1], callback_data=f"find_city_{city[0]}") for city in get_cities()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+@dp.callback_query_handler(lambda call: call.data.startswith('select_city_'), state=0)
+async def select_city(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    selected_city = call.data[len('select_city_'):]
 
-    query.edit_message_text("Выберите город для поиска объявлений:", reply_markup=reply_markup)
-    return FIND_CITY
+    async with state.proxy() as data:
+        data['city'] = selected_city
 
-def find_announcement_step2(update: Update, context: CallbackContext):
-    query = update.callback_query
-    city_id = int(query.data.split("_")[2])
-    context.user_data["find_city_id"] = city_id
-    query.answer()
+    await call.message.reply("Пожалуйста, напишите краткую информацию о себе.", reply_markup=back_to_main_menu_keyboard())
 
-    keyboard = [
-        [InlineKeyboardButton(service[1], callback_data=f"find_service_{service[0]}") for service in get_services()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
-    query.edit_message_text("Выберите услугу для поиска объявлений:", reply_markup=reply_markup)
-    return FIND_SERVICE
 
-def find_announcement_step3(update: Update, context: CallbackContext):
-    query = update.callback_query
-    service_id = int(query.data.split("_")[2])
-    context.user_data["find_service_id"] = service_id
-    query.answer()
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=1)
+async def process_bio(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['bio'] = message.text
 
-    query.edit_message_text("Введите диапазон стоимости (например, 100-500) или нажмите на кнопку ниже, чтобы пропустить этот шаг:", reply_markup=telegram.ReplyKeyboardMarkup([[
-        telegram.KeyboardButton("Пропустить")
-    ]], one_time_keyboard=True, resize_keyboard=True))
-    return FIND_PRICE_RANGE
+    await message.reply("Пожалуйста, предоставьте ссылку на ваше портфолио (если есть) или отправьте 'нет', если у вас нет портфолио.", reply_markup=back_to_main_menu_keyboard())
 
-def find_announcement_results(update: Update, context: CallbackContext):
-    price_range = update.message.text.strip()
-    min_price, max_price = None, None
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
-    if price_range.lower() != "пропустить":
-        try:
-            min_price, max_price = map(float, price_range.split('-'))
-        except ValueError:
-            update.message.reply_text("Некорректный диапазон стоимости. Попробуйте еще раз.")
-            return FIND_PRICE_RANGE
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=2)
+async def process_portfolio(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['portfolio'] = message.text
 
-    city_id = context.user_data["find_city_id"]
-    service_id = context.user_data["find_service_id"]
+        user_id = message.from_user.id
+        name = data['name']
+        service = data['service']
+        city = data['city']
+        bio = data['bio']
+        portfolio = data['portfolio']
 
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
+        add_user(user_id, name, service, city, bio, portfolio)
 
-    if min_price is not None and max_price is not None:
-        cursor.execute(
-            """
-            SELECT a.description, a.price, u.phone_number
-            FROM announcements a
-            JOIN users u ON a.user_id = u.user_id
-            WHERE a.city_id = ? AND a.service_id = ? AND a.price BETWEEN ? AND ?
-            """,
-            (city_id, service_id, min_price, max_price),
-        )
+    await message.reply("Ваше объявление успешно создано! Вы можете просмотреть свой профиль или найти услуги других пользователей.", reply_markup=main_menu_keyboard())
+    await state.finish()
+
+@dp.message_handler(lambda message: message.text == "Открыть профиль")
+async def open_profile(message: types.Message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+
+    if user:
+        await message.reply(f"Привет, {user[1]}! Ваша услуга: {user[2]}\nВаш город: {user[3]}\nВаша биография: {user[4]}\nПортфолио: {user[5]}", reply_markup=open_profile_keyboard())
     else:
-        cursor.execute(
-            """
-            SELECT a.description, a.price, u.phone_number
-            FROM announcements a
-            JOIN users u ON a.user_id = u.user_id
-            WHERE a.city_id = ? AND a.service_id = ?
-            """,
-            (city_id, service_id),
-        )
+        await message.reply("У вас пока нет профиля. Хотите создать объявление?", reply_markup=registration_keyboard())
 
-    results = cursor.fetchall()
-    conn.close()
-
-    if results:
-        for result in results:
-            update.message.reply_text(f"Описание: {result[0]}\nЦена: {result[1]}\nТелефон: {result[2]}")
-    else:
-        update.message.reply_text("К сожалению, по вашему запросу ничего не найдено.")
-
-    return ConversationHandler.END
-
-def my_profile(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    user_id = update.effective_user.id
-
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT a.id, a.description, a.price, c.city, s.service FROM announcements a JOIN cities c ON a.city_id = c.id JOIN services s ON a.service_id = s.id WHERE a.user_id = ?", (user_id,))
-    announcement = cursor.fetchone()
-    conn.close()
-
-    if announcement:
-        text = f"Ваше объявление:\nID: {announcement[0]}\nОписание: {announcement[1]}\nЦена: {announcement[2]}\nГород: {announcement[3]}\nУслуга: {announcement[4]}"
-    else:
-        text = "У вас нет активных объявлений."
-
-    query.edit_message_text(text)
+@dp.message_handler(lambda message: message.text == "Редактировать профиль")
+async def edit_profile(message: types.Message):
+    await message.reply("Введите новое имя и фамилию (или оставьте старые, если не хотите их менять).", reply_markup=back_to_main_menu_keyboard())
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
 
-EDIT_ANNOUNCEMENT, EDIT_CITY, EDIT_SERVICE, EDIT_DESCRIPTION, EDIT_PRICE = range(5)
+# Continue with the rest of the code from the previous message.
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=3)
+async def process_edit_name(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['new_name'] = message.text
 
-def delete_announcement(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    user_id = update.effective_user.id
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM announcements WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-    query.edit_message_text("Ваше объявление удалено.")
-
-def edit_announcement_step1(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton(city[1], callback_data=f"edit_city_{city[0]}") for city in get_cities()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    query.edit_message_text("Выберите новый город для вашего объявления:", reply_markup=reply_markup)
-    return EDIT_CITY
-
-def edit_announcement_step2(update: Update, context: CallbackContext):
-    query = update.callback_query
-    city_id = int(query.data.split("_")[2])
-    context.user_data["edit_city_id"] = city_id
-    query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton(service[1], callback_data=f"edit_service_{service[0]}") for service in get_services()]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    query.edit_message_text("Выберите новую услугу для вашего объявления:", reply_markup=reply_markup)
-    return EDIT_SERVICE
-
-def edit_announcement_step3(update: Update, context: CallbackContext):
-    query = update.callback_query
-    service_id = int(query.data.split("_")[2])
-    context.user_data["edit_service_id"] = service_id
-    query.answer()
-
-    query.edit_message_text("Введите новое описание для вашего объявления (от 20 до 160 символов):")
-    return EDIT_DESCRIPTION
-
-def edit_announcement_step4(update: Update, context: CallbackContext):
-    description = update.message.text.strip()
-    if len(description) < 20 or len(description) > 160:
-        update.message.reply_text("Описание должно быть от 20 до 160 символов. Попробуйте еще раз.")
-        return EDIT_DESCRIPTION
-
-    context.user_data["edit_description"] = description
-    update.message.reply_text("Введите новую цену для вашего объявления:")
-    return EDIT_PRICE
-
-def edit_announcement_step5(update: Update, context: CallbackContext):
-    try:
-        price = float(update.message.text.strip())
-    except ValueError:
-        update.message.reply_text("Некорректное значение цены. Попробуйте еще раз.")
-        return EDIT_PRICE
-
-    user_id = update.effective_user.id
-    new_city_id = context.user_data["edit_city_id"]
-    new_service_id = context.user_data["edit_service_id"]
-    new_description = context.user_data["edit_description"]
-
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        UPDATE announcements
-        SET city_id = ?, service_id = ?, description = ?, price = ?
-        WHERE user_id = ?
-        """,
-        (new_city_id, new_service_id, new_description, price, user_id),
-    )
-    conn.commit()
-    conn.close()
-
-    update.message.reply_text("Ваше объявление успешно обновлено.")
-    return ConversationHandler.END
-
-def handle_edit_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    if query.data == "delete_announcement":
-        return delete_announcement(update, context)
-    elif query.data == "edit_announcement":
-        return edit_announcement_step1(update, context)
-
-def my_profile(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-
-    user_id = update.effective_user.id
-
-    conn = sqlite3.connect("announce_bot.db")
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT a.id, a.description, a.price, c.city, s.service FROM announcements a JOIN cities c ON a.city_id = c.id JOIN services s ON a.service_id = s.id WHERE a.user_id = ?", (user_id,))
-    announcement = cursor.fetchone()
-    conn.close()
-
-    if announcement:
-        text = f"Ваше объявление:\nID: {announcement[0]}\nОписание: {announcement[1]}\nЦена: {announcement[2]}\nГород: {announcement[3]}\nУслуга: {announcement[4]}"
-        keyboard = [
-            [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_announcement")],
-            [InlineKeyboardButton("🗑 Удалить", callback_data="delete_announcement")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        query.edit_message_text(text, reply_markup=reply_markup)
-    else:
-        query.edit_message_text("У вас нет активных объявлений.")
-
-edit_handler = ConversationHandler(
-    entry_points=[CallbackQueryHandler(handle_edit_callback, pattern="^(edit_announcement|delete_announcement)$")],
-    states={
-        EDIT_CITY: [CallbackQueryHandler(edit_announcement_step2, pattern="^edit_city_")],
-        EDIT_SERVICE: [CallbackQueryHandler(edit_announcement_step3, pattern="^edit_service_")],
-        EDIT_DESCRIPTION: [MessageHandler(Filters.text, edit_announcement_step4)],
-        EDIT_PRICE: [MessageHandler(Filters.text, edit_announcement_step5)],
-    },
-    fallbacks=[],
-)
-
-dp.add_handler(edit_handler)
+    await message.reply("Введите новую услугу (или оставьте старую, если не хотите ее менять).", reply_markup=back_to_main_menu_keyboard())
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
 
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=4)
+async def process_edit_service(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['new_service'] = message.text
 
-def main():
-    logging.basicConfig(level=logging.INFO)
-    updater = Updater("5741958407:AAFlowMVLrQM2brVpCMDx9yRNs27sMy3XsE")
-    dp = updater.dispatcher
+    await message.reply("Выберите новый город (или оставьте старый, если не хотите его менять).", reply_markup=cities_keyboard())
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
-    post_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(post_announcement_step1, pattern="^post_announcement$")],
-        states={
-            POST_CITY: [CallbackQueryHandler(post_announcement_step2, pattern="^post_city_")],
-            POST_SERVICE: [CallbackQueryHandler(post_announcement_step3, pattern="^post_service_")],
-            POST_DESCRIPTION: [MessageHandler(Filters.text, post_announcement_step4)],
-            POST_PRICE: [MessageHandler(Filters.text, post_announcement_step5)],
-            POST_PHONE: [MessageHandler(Filters.text | Filters.contact, post_announcement_step6)],
-        },
-        fallbacks=[],
-    )
-    dp.add_handler(post_handler)
 
-    find_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(find_announcement_step1, pattern="^find_announcement$")],
-        states={
-            FIND_CITY: [CallbackQueryHandler(find_announcement_step2, pattern="^find_city_")],
-            FIND_SERVICE: [CallbackQueryHandler(find_announcement_step3, pattern="^find_service_")],
-            FIND_PRICE_RANGE: [MessageHandler(Filters.text, find_announcement_results)],
-        },
-        fallbacks=[],
-    )
-    dp.add_handler(find_handler)
+@dp.callback_query_handler(lambda call: call.data.startswith('city_'), state=5)
+async def process_edit_city(call: types.CallbackQuery, state: FSMContext):
+    city_id = int(call.data[5:])
+    city = cities[city_id]
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CallbackQueryHandler(handle_callback))
-    updater.start_polling()
-    updater.idle()
+    async with state.proxy() as data:
+        data['new_city'] = city
 
-def main():
-    create_tables()
-    populate_database()
-    bot.polling(none_stop=True)
+    await call.message.reply("Введите новую биографию (или оставьте старую, если не хотите ее менять). Ограничение по символам от 20 до 160.", reply_markup=back_to_main_menu_keyboard())
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
 
-if __name__ == '__main__':
-    main()
+
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=6)
+async def process_edit_bio(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['new_bio'] = message.text
+
+    await message.reply("Пожалуйста, предоставьте ссылку на ваше новое портфолио (если есть) или отправьте 'нет', если у вас нет портфолио. (или оставьте старое, если не хотите его менять).", reply_markup=back_to_main_menu_keyboard())
+    state = dp.current_state(user=message.from_user.id)
+    await state.next()
+
+
+@dp.message_handler(lambda message: message.text not in ["Вернуться на главную"], state=7)
+async def process_edit_portfolio(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['new_portfolio'] = message.text
+
+        user_id = message.from_user.id
+        new_name = data['new_name']
+        new_service = data['new_service']
+        new_city = data['new_city']
+        new_bio = data['new_bio']
+        new_portfolio = data['new_portfolio']
+
+        update_user(user_id, new_name, new_service, new_city, new_bio, new_portfolio)
+
+    await message.reply("Ваш профиль успешно обновлен! Вы можете просмотреть свой профиль или найти услуги других пользователей.", reply_markup=main_menu_keyboard())
+    await state.finish()
+
+# ... (остальная часть кода)
+if __name__ == "__main__":
+    from aiogram import executor
+    executor.start_polling(dp)
